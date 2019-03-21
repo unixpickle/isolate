@@ -12,7 +12,12 @@
 
 #define DEBUG 0
 
+int configure_user_namespace();
 int configure_uid_map();
+int configure_other_namespaces();
+void make_mountpoints();
+int perform_mounts();
+int perform_chroot();
 
 int main(int argc, const char** argv) {
     if (argc != 2) {
@@ -32,6 +37,32 @@ int main(int argc, const char** argv) {
         return 1;
     }
 
+    if (configure_user_namespace()) {
+        return 1;
+    }
+    if (configure_other_namespaces()) {
+        return 1;
+    }
+
+    make_mountpoints();
+    if (perform_mounts()) {
+        return 1;
+    }
+
+    if (perform_chroot()) {
+        return 1;
+    }
+
+    if (DEBUG) {
+        fprintf(stderr, "executing shell ...\n");
+    }
+    if (execl("/bin/bash", "/bin/bash", NULL) != 0) {
+        perror("execl");
+        return 1;
+    }
+}
+
+int configure_user_namespace() {
     int old_uid = getuid();
     int old_gid = getgid();
     if (DEBUG) {
@@ -46,92 +77,6 @@ int main(int argc, const char** argv) {
         fprintf(stderr, "configuring UID map ...\n");
     }
     if (configure_uid_map(old_uid, old_gid)) {
-        return 1;
-    }
-
-    if (DEBUG) {
-        fprintf(stderr, "creating other namespaces ...\n");
-    }
-    if (unshare(CLONE_NEWNS | CLONE_NEWPID) != 0) {
-        perror("unshare");
-        return 1;
-    }
-
-    pid_t pid = fork();
-    if (pid != 0) {
-        int status = 0;
-        waitpid(pid, &status, 0);
-        return status;
-    }
-
-    char working_dir[512];
-    getcwd(working_dir, sizeof(working_dir));
-
-    const char* mkdirs[] = {
-        "bin",
-        "lib",
-        "lib64",
-        "proc",
-        "sbin",
-        "usr",
-        "usr/bin",
-        "usr/lib",
-        "usr/sbin",
-    };
-    for (int i = 0; i < sizeof(mkdirs) / sizeof(mkdirs[0]); ++i) {
-        mkdir(mkdirs[i], 0755);
-    }
-
-    const char* paths[] = {
-        "/bin",
-        "/lib",
-        "/lib64",
-        "/sbin",
-        "/usr/bin",
-        "/usr/lib",
-        "/usr/sbin",
-    };
-    for (int i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
-        const char* path = paths[i];
-        size_t path_size = strlen(path) + strlen(working_dir) + 1;
-        char abs_path[512];
-        snprintf(abs_path, sizeof(abs_path), "%s%s", working_dir, path);
-        if (DEBUG) {
-            fprintf(stderr, "bind mounting %s to %s ...\n", path, abs_path);
-        }
-        if (mount(path, abs_path, NULL, MS_BIND, NULL) != 0) {
-            perror("mount");
-            return 1;
-        }
-    }
-
-    char proc_path[512];
-    snprintf(proc_path, sizeof(proc_path), "%s/proc", working_dir);
-    if (DEBUG) {
-        fprintf(stderr, "mounting proc to %s ...\n", proc_path);
-    }
-    if (mount("proc", proc_path, "proc", 0, NULL) != 0) {
-        perror("mount");
-        return 1;
-    }
-
-    if (DEBUG) {
-        fprintf(stderr, "changing root to %s ...\n", working_dir);
-    }
-    if (chroot(working_dir) != 0) {
-        perror("chroot");
-        return 1;
-    }
-    if (chdir("/") != 0) {
-        perror("chdir");
-        return 1;
-    }
-
-    if (DEBUG) {
-        fprintf(stderr, "executing shell ...\n");
-    }
-    if (execl("/bin/bash", "/bin/bash", NULL) != 0) {
-        perror("execl");
         return 1;
     }
 }
@@ -170,6 +115,102 @@ int configure_uid_map(int old_uid, int old_gid) {
             return 1;
         }
         fclose(fp);
+    }
+    return 0;
+}
+
+int configure_other_namespaces() {
+    if (DEBUG) {
+        fprintf(stderr, "creating other namespaces ...\n");
+    }
+    if (unshare(CLONE_NEWNS | CLONE_NEWPID) != 0) {
+        perror("unshare");
+        return 1;
+    }
+
+    // CLONE_NEWPID doesn't work until we fork.
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return 1;
+    }
+    if (pid != 0) {
+        int status = 0;
+        waitpid(pid, &status, 0);
+        exit(status);
+    }
+
+    return 0;
+}
+
+void make_mountpoints() {
+    const char* mkdirs[] = {
+        "bin",
+        "lib",
+        "lib64",
+        "proc",
+        "sbin",
+        "usr",
+        "usr/bin",
+        "usr/lib",
+        "usr/sbin",
+    };
+    for (int i = 0; i < sizeof(mkdirs) / sizeof(mkdirs[0]); ++i) {
+        mkdir(mkdirs[i], 0755);
+    }
+}
+
+int perform_mounts() {
+    char working_dir[512];
+    getcwd(working_dir, sizeof(working_dir));
+
+    const char* paths[] = {
+        "/bin",
+        "/lib",
+        "/lib64",
+        "/sbin",
+        "/usr/bin",
+        "/usr/lib",
+        "/usr/sbin",
+    };
+    for (int i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        const char* path = paths[i];
+        size_t path_size = strlen(path) + strlen(working_dir) + 1;
+        char abs_path[512];
+        snprintf(abs_path, sizeof(abs_path), "%s%s", working_dir, path);
+        if (DEBUG) {
+            fprintf(stderr, "bind mounting %s to %s ...\n", path, abs_path);
+        }
+        if (mount(path, abs_path, NULL, MS_BIND, NULL) != 0) {
+            perror("mount");
+            return 1;
+        }
+    }
+
+    char proc_path[512];
+    snprintf(proc_path, sizeof(proc_path), "%s/proc", working_dir);
+    if (DEBUG) {
+        fprintf(stderr, "mounting proc to %s ...\n", proc_path);
+    }
+    if (mount("proc", proc_path, "proc", 0, NULL) != 0) {
+        perror("mount");
+        return 1;
+    }
+}
+
+int perform_chroot() {
+    char working_dir[512];
+    getcwd(working_dir, sizeof(working_dir));
+    if (DEBUG) {
+        fprintf(stderr, "changing root to %s ...\n", working_dir);
+    }
+    if (chroot(working_dir) != 0) {
+        perror("chroot");
+        return 1;
+    }
+    if (chdir("/") != 0) {
+        perror("chdir");
+        return 1;
     }
     return 0;
 }
