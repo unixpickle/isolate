@@ -146,6 +146,8 @@ int configure_other_namespaces() {
 void make_mountpoints() {
     const char* mkdirs[] = {
         "bin",
+        "etc",
+        "etc/alternatives",
         "lib",
         "lib64",
         "proc",
@@ -166,6 +168,7 @@ int perform_mounts() {
 
     const char* paths[] = {
         "/bin",
+        "/etc/alternatives",
         "/lib",
         "/lib64",
         "/sbin",
